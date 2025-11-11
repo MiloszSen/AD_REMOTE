@@ -24,9 +24,9 @@ OUT_DIR = PROJECT_ROOT / "data" / "output"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-SELECTED_PPE: str | None = 590310600000321756         
+SELECTED_PPE: str | None = 590310600000271389     
 
-SELECTED_UNIT: str | None = "V"
+SELECTED_UNIT: str | None = "A"
 
 PLOT_LAST_DAYS: int | None = 300
 
