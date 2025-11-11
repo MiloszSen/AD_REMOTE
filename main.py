@@ -3,8 +3,7 @@ import argparse
 import os
 import pandas as pd
 import numpy as np
-
-# ── Matplotlib w trybie bez GUI (Windows/Tk błąd) ───────────────────────────────
+from detection.indicators import compute_S, compute_pf, compute_wsp2, compute_wsp3, flags_from_indicators
 os.environ.setdefault("MPLBACKEND", "Agg")
 import matplotlib
 matplotlib.use("Agg")
@@ -24,39 +23,42 @@ DATA_MID = PROJECT_ROOT / "data" / "output_mid" / "data_long.parquet"
 OUT_DIR = PROJECT_ROOT / "data" / "output"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# Ustaw numer PPE do analizy; jeśli None — weź pierwszy dostępny z danych
-SELECTED_PPE: str | None = 590310600000271389         # np. "590310600029270547"
-# Ustaw jednostkę do analizy; None = bez filtra. Typowe: "V" (napięcie), "A" (prąd)
-SELECTED_UNIT: str | None = "A"
-# Ile ostatnich dni pokazać na wykresie (None = cały zakres)
+
+SELECTED_PPE: str | None = 590310600000321756         
+
+SELECTED_UNIT: str | None = "V"
+
 PLOT_LAST_DAYS: int | None = 300
-# Styl wykresu: "scatter" (zalecany przy gęstych danych) lub "line"
+
 PLOT_STYLE: str = "line"
-# Próbkowanie do wykresu (None = bez próbkowania). Np. 10 => co 10-ty punkt
+
 DOWNSAMPLE_EVERY: int | None = 10
 
-# Wybór metody detekcji anomalii
-DETECTION_METHOD = "lof"  # dostępne: "isolation_forest", "lof"
+
+DETECTION_METHOD = "lof"  
 DETECTOR_PARAMS = {
     "isolation_forest": {
         "contamination": 0.005,
         "n_estimators": 350,
         "random_state": 42,
+        "scaler": "robust",
     },
     "lof": {
         "contamination": 0.005,
+        "n_neighbors": 40,
+        "scaler": "robust",
+    },
+    "knn": {
+        "contamination": 0.005,
         "n_neighbors": 20,
+        "scaler": "robust",
     },
 }
 
-# Post-processing (grupowanie zdarzeń)
-NEAR_ZERO_THRESH = 0.1          # wartości <= tego progu traktuj jako "prawie zero" (dla V)
-EVENT_GAP_MINUTES = 20          # zlepiaj anomalie oddzielone przerwą <= 20 min w jedno zdarzenie
-MIN_EVENT_POINTS = 1            # odfiltruj pojedyncze strzały jako szum (ustaw 1, żeby zostawić wszystko)
 
-# ────────────────────────────────────────────────────────────────────────────────
-# Funkcje pomocnicze (ETL + sanity checks)
-# ────────────────────────────────────────────────────────────────────────────────
+NEAR_ZERO_THRESH = 0.1          
+EVENT_GAP_MINUTES = 20          
+MIN_EVENT_POINTS = 3            
 
 def load_long() -> pd.DataFrame:
     if not DATA_MID.exists():
@@ -96,18 +98,38 @@ def pick_one_ppe(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_features(d: pd.DataFrame) -> pd.DataFrame:
-    d = d.copy()
-    # sanity: usuń wiersze bez timestamp/wartości (nie trenujemy na NaN)
-    d = d.dropna(subset=["timestamp", "wartosc"]).reset_index(drop=True)
+    d = d.copy().dropna(subset=["timestamp","wartosc"]).reset_index(drop=True)
     d["hour"] = d["timestamp"].dt.hour
     d["minute"] = d["timestamp"].dt.minute
     d["dayofweek"] = d["timestamp"].dt.dayofweek
     d = d.sort_values("timestamp")
-    # cechy rolling w oknie ~1h (próbkowanie co 10 min => 6 próbek)
+
+    
     d["roll_mean_1h"] = d["wartosc"].rolling(window=6, min_periods=1).mean()
     d["roll_std_1h"]  = d["wartosc"].rolling(window=6, min_periods=1).std().fillna(0.0)
+
+    hhmm = d["timestamp"].dt.strftime("%H:%M")
+    grp = d.groupby(hhmm)["wartosc"]
+    med = grp.transform("median")
+    iqr = grp.transform(lambda x: x.quantile(0.75) - x.quantile(0.25)).replace(0, np.nan)
+    d["z_hour"] = (d["wartosc"] - med) / iqr
+    d["z_hour"] = d["z_hour"].fillna(0.0)
     return d
 
+def enrich_physics(d: pd.DataFrame) -> pd.DataFrame:
+    x = d.copy()
+    
+    hr = x["timestamp"].dt.hour
+    x["is_night"] = (hr >= 22) | (hr < 4)
+
+    x["S"]    = compute_S(x)
+    x["pf"]   = compute_pf(x)
+    x["wsp2"] = compute_wsp2(x)
+    x["wsp3"] = compute_wsp3(x)
+
+    flags = flags_from_indicators(x)
+    x = pd.concat([x, flags.add_prefix("flag_")], axis=1)
+    return x
 
 def apply_detector(d: pd.DataFrame, method: str = DETECTION_METHOD) -> pd.DataFrame:
     detector = get_detector(method)
@@ -149,19 +171,16 @@ def validate_selection(d: pd.DataFrame) -> pd.DataFrame:
 def make_plot(d: pd.DataFrame, out_png: Path):
     d_plot = d.copy()
 
-    # okno czasowe: ostatnie PLOT_LAST_DAYS
     if PLOT_LAST_DAYS is not None and len(d_plot) > 0:
         tmax = d_plot["timestamp"].max()
         tmin = tmax - pd.Timedelta(days=PLOT_LAST_DAYS)
         d_plot = d_plot[d_plot["timestamp"] >= tmin]
 
-    # próbkowanie dla czytelności wykresu
     if DOWNSAMPLE_EVERY is not None and DOWNSAMPLE_EVERY > 1:
         d_plot = d_plot.iloc[::DOWNSAMPLE_EVERY, :]
 
     fig, ax = plt.subplots(figsize=(14, 5))
 
-    # seria normalna
     if ANOMALY_LABEL_COL in d_plot.columns:
         normal_mask = d_plot[ANOMALY_LABEL_COL] == 1
     else:
@@ -186,7 +205,6 @@ def make_plot(d: pd.DataFrame, out_png: Path):
             label="normalne",
         )
 
-    # anomalie wyróżnione na czerwono
     anom = d_plot[~normal_mask]
     if not anom.empty:
         ax.scatter(anom["timestamp"], anom["wartosc"], s=15, color="red", label="anomalia")
@@ -299,7 +317,6 @@ def save_outputs(d: pd.DataFrame, method: str):
         out_evt = OUT_DIR / f"anomaly_events_{method_alias}_{unit}_{ppe}.csv"
         events.to_csv(out_evt, index=False)
         print(f"[OK] Zapisano zdarzenia: {out_evt}")
-    i
     if label_series is not None:
         n_anom = int((label_series == -1).sum())
     else:
@@ -321,6 +338,7 @@ def run_pipeline(method: str):
     d = pick_one_ppe(df)
     d = validate_selection(d)
     d = add_features(d)
+    d = enrich_physics(d)
     d = apply_detector(d, method)
     save_outputs(d, method)
 

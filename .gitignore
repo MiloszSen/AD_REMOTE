@@ -1,0 +1,8 @@
+*.png
+__pycache__/
+*.pyc
+*.pyo
+*.parquet
+*.csv
+*.pkl
+*.log

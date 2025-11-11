@@ -28,10 +28,9 @@ DEFAULT_PARAMS = {
 }
 
 
-def run(df: pd.DataFrame, *, features: Sequence[str] | None = None, **kwargs) -> pd.DataFrame:
+def run(df: pd.DataFrame, *, features=None, scaler: str | None = "robust", **kwargs) -> pd.DataFrame:
     feats = features or DEFAULT_FEATURES
-    X = prepare_features(df, feats)
-
+    X = prepare_features(df, feats, scaler=scaler)
     params = DEFAULT_PARAMS | kwargs
     model = IsolationForest(**params)
     model.fit(X)

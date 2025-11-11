@@ -4,13 +4,13 @@ from typing import Sequence
 
 import pandas as pd
 from sklearn.neighbors import LocalOutlierFactor
-
 from .utils import (
-    ANOMALY_LABEL_COL,
-    ANOMALY_METHOD_COL,
-    ANOMALY_SCORE_COL,
-    add_context_columns,
-    prepare_features,
+    ANOMALY_LABEL_COL, ANOMALY_METHOD_COL, ANOMALY_SCORE_COL,
+    add_context_columns, prepare_features, choose_features
+)
+CANDIDATE_FEATURES: tuple[str, ...] = (
+    "wartosc", "roll_mean_1h", "roll_std_1h",  
+    "pf", "wsp2", "wsp3"                       
 )
 
 DEFAULT_FEATURES: Sequence[str] = (
@@ -31,10 +31,9 @@ DEFAULT_PARAMS = {
 }
 
 
-def run(df: pd.DataFrame, *, features: Sequence[str] | None = None, **kwargs) -> pd.DataFrame:
+def run(df: pd.DataFrame, *, features=None, scaler: str | None = "robust", **kwargs) -> pd.DataFrame:
     feats = features or DEFAULT_FEATURES
-    X = prepare_features(df, feats)
-
+    X = prepare_features(df, feats, scaler=scaler)
     params = DEFAULT_PARAMS | kwargs
     model = LocalOutlierFactor(**params)
     labels = model.fit_predict(X)

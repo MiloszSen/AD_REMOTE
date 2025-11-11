@@ -34,7 +34,7 @@ def detect_encoding(file_path: Path, *, sample_size: int = 100_000) -> str:
     with file_path.open("rb") as f:
         raw = f.read(sample_size)
 
-    # Fast path for common BOM markers.
+    
     bom_map = {
         b"\xef\xbb\xbf": "utf-8-sig",
         b"\xff\xfe": "utf-16",
@@ -73,4 +73,6 @@ df = pd.read_csv(
 
 df.columns = [normalize_col(c) for c in df.columns]
 # print(f"[INFO] Wykryto kodowanie: {encoding}")
-print(tabulate(df.head(), headers='keys', tablefmt='psql'))
+#print(tabulate(df.head(), headers='keys', tablefmt='psql'))
+df["numer_ppe"] = df["numer_ppe"].astype(str)
+print(tabulate(df[["numer_ppe"]].drop_duplicates(), headers='keys', tablefmt='psql'))
