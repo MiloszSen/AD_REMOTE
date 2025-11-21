@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Iterable, Sequence
 
 import pandas as pd
 import numpy as np
@@ -9,13 +9,6 @@ from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
 ANOMALY_SCORE_COL = "anomaly_score"
 ANOMALY_LABEL_COL = "anomaly_label"
 ANOMALY_METHOD_COL = "anomaly_method"
-
-
-def prepare_features(df: pd.DataFrame, features: Iterable[str]) -> pd.DataFrame:
-    missing = [col for col in features if col not in df.columns]
-    if missing:
-        raise KeyError(f"Missing features for detector: {missing}")
-    return df[list(features)].astype(float)
 
 
 def add_context_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -39,20 +32,40 @@ def add_context_columns(df: pd.DataFrame) -> pd.DataFrame:
         result["z_hour"] = (result["wartosc"] - result["hour_mean"]) / result["hour_std"].replace(0, np.nan)
     return result
 
+
 def get_scaler(name: str | None):
-    if name in (None, "none"): return None
-    table = {"standard": StandardScaler(), "minmax": MinMaxScaler(), "robust": RobustScaler()}
+    if name in (None, "none"):
+        return None
+    table = {
+        "standard": StandardScaler(),
+        "minmax": MinMaxScaler(),
+        "robust": RobustScaler(),
+    }
     if name not in table:
         raise ValueError(f"Unknown scaler: {name}")
     return table[name]
 
-def choose_features(df: pd.DataFrame, candidates: tuple[str, ...]) -> list[str]:
-    feats = [c for c in candidates if c in df.columns and not df[c].isna().all()]
+
+def choose_features(df: pd.DataFrame, candidates: Sequence[str]) -> list[str]:
+    """
+    Bierzemy tylko te cechy, które:
+      - istnieją w df.columns
+      - NIE są w całości NaN
+    """
+    feats: list[str] = []
+    for c in candidates:
+        if c in df.columns:
+            col = df[c]
+            if not col.isna().all():
+                feats.append(c)
+
     if not feats:
         raise ValueError(f"None of the candidate features exist: {candidates}")
+
     return feats
 
-def prepare_features(df: pd.DataFrame, feats, scaler: str | None = None):
+
+def prepare_features(df: pd.DataFrame, feats: Sequence[str], scaler: str | None = None) -> np.ndarray:
     X = df.loc[:, feats].astype(float).values
     sc = get_scaler(scaler)
     return sc.fit_transform(X) if sc else X

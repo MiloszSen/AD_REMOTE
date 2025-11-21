@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 from detection.indicators import compute_S, compute_pf, compute_wsp2, compute_wsp3, flags_from_indicators
 os.environ.setdefault("MPLBACKEND", "Agg")
+from preparation.load_data import ppe
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -24,28 +25,29 @@ OUT_DIR = PROJECT_ROOT / "data" / "output"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-SELECTED_PPE: str | None = 590310600000271389     
 
-SELECTED_UNIT: str | None = "A"
+SELECTED_PPE: str | None = ppe[8]  
+
+SELECTED_UNIT: str | None = "V"
 
 PLOT_LAST_DAYS: int | None = 300
 
 PLOT_STYLE: str = "line"
 
-DOWNSAMPLE_EVERY: int | None = 10
+DOWNSAMPLE_EVERY: int | None = 2
 
 
 DETECTION_METHOD = "lof"  
 DETECTOR_PARAMS = {
     "isolation_forest": {
-        "contamination": 0.005,
+        "contamination": 0.0001,
         "n_estimators": 350,
         "random_state": 42,
         "scaler": "robust",
     },
     "lof": {
-        "contamination": 0.005,
-        "n_neighbors": 40,
+        "contamination": 0.001,
+        "n_neighbors": 80,
         "scaler": "robust",
     },
     "knn": {
@@ -58,7 +60,7 @@ DETECTOR_PARAMS = {
 
 NEAR_ZERO_THRESH = 0.1          
 EVENT_GAP_MINUTES = 20          
-MIN_EVENT_POINTS = 3            
+MIN_EVENT_POINTS = 3           
 
 def load_long() -> pd.DataFrame:
     if not DATA_MID.exists():
@@ -98,13 +100,17 @@ def pick_one_ppe(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_features(d: pd.DataFrame) -> pd.DataFrame:
-    d = d.copy().dropna(subset=["timestamp","wartosc"]).reset_index(drop=True)
+    d = d.copy()
+
+    # Usuwamy tylko wiersze bez czasu, ale zachowujemy NaNy w 'wartosc'
+    d = d.dropna(subset=["timestamp"]).reset_index(drop=True)
+
     d["hour"] = d["timestamp"].dt.hour
     d["minute"] = d["timestamp"].dt.minute
     d["dayofweek"] = d["timestamp"].dt.dayofweek
     d = d.sort_values("timestamp")
 
-    
+    # Dalej bez zmian:
     d["roll_mean_1h"] = d["wartosc"].rolling(window=6, min_periods=1).mean()
     d["roll_std_1h"]  = d["wartosc"].rolling(window=6, min_periods=1).std().fillna(0.0)
 
@@ -114,6 +120,7 @@ def add_features(d: pd.DataFrame) -> pd.DataFrame:
     iqr = grp.transform(lambda x: x.quantile(0.75) - x.quantile(0.25)).replace(0, np.nan)
     d["z_hour"] = (d["wartosc"] - med) / iqr
     d["z_hour"] = d["z_hour"].fillna(0.0)
+
     return d
 
 def enrich_physics(d: pd.DataFrame) -> pd.DataFrame:
@@ -133,12 +140,29 @@ def enrich_physics(d: pd.DataFrame) -> pd.DataFrame:
 
 def apply_detector(d: pd.DataFrame, method: str = DETECTION_METHOD) -> pd.DataFrame:
     detector = get_detector(method)
+
+    
     overrides = DETECTOR_PARAMS.get(method, {}) or {}
+    overrides = overrides.copy()  
+
+    
+    if method == "lof" and SELECTED_UNIT is None:
+        
+        indicator_feats = [
+            c for c in ["S", "wsp2", "wsp3"]
+            if c in d.columns and not d[c].isna().all()
+        ]
+        if indicator_feats:
+            overrides["features"] = indicator_feats
+
+
     if overrides:
         print(f"[INFO] Uruchamiam detektor={method} z parametrami {overrides}")
     else:
         print(f"[INFO] Uruchamiam detektor={method}")
+
     return detector(d, **overrides)
+
 
 
 def _unit_from_df(d: pd.DataFrame) -> str:
@@ -154,18 +178,116 @@ def _ppe_from_df(d: pd.DataFrame) -> str:
 
 
 def validate_selection(d: pd.DataFrame) -> pd.DataFrame:
-    if "jednostka" in d.columns:
-        units = d["jednostka"].dropna().astype(str).unique().tolist()
-        if len(units) != 1:
-            raise RuntimeError(f"[FAIL] Dataset zawiera wiele jednostek: {units}. Ustaw SELECTED_UNIT lub popraw filtr.")
+    """
+    Sprawdza spójność danych:
+    - zawsze wymagamy jednego PPE,
+    - JEDNOSTKA:
+        * jeśli SELECTED_UNIT jest ustawione -> pilnujemy jednej jednostki,
+        * jeśli SELECTED_UNIT is None -> pozwalamy na wiele jednostek (A, V, kW, ...).
+    """
+   
     if "numer_ppe" in d.columns:
         ppes = d["numer_ppe"].dropna().astype(str).unique().tolist()
         if len(ppes) != 1:
             raise RuntimeError(f"[FAIL] Dataset zawiera wiele licznikow: {ppes[:5]}... Ustaw SELECTED_PPE lub popraw filtr.")
-    # porządkowanie
-    d = d.sort_values("timestamp").drop_duplicates(subset=["timestamp"]).reset_index(drop=True)
-    print(f"[OK] Walidacja: 1 jednostka i 1 licznik. Rekordow={len(d)}")
+
+   
+    if "jednostka" in d.columns and SELECTED_UNIT is not None:
+        units = d["jednostka"].dropna().astype(str).unique().tolist()
+        if len(units) != 1:
+            raise RuntimeError(f"[FAIL] Dataset zawiera wiele jednostek: {units}. Ustaw SELECTED_UNIT lub popraw filtr.")
+
+    d = d.sort_values("timestamp").reset_index(drop=True)
+    print(f"[OK] Walidacja: 1 licznik. Jednostki={sorted(d['jednostka'].dropna().astype(str).unique().tolist())}")
     return d
+
+import unicodedata
+import re
+
+def reshape_three_phase(d: pd.DataFrame) -> pd.DataFrame:
+    """
+    Z formatu long (Prąd/Napięcie + Fazy 1/2/3 + A/V)
+    robi jeden wiersz na timestamp z kolumnami:
+      I1, I2, I3, U1, U2, U3
+    oraz definiuje 'wartosc' jako sumę modułów prądów fazowych.
+    """
+    d = d.copy()
+
+    needed_cols = [
+        "timestamp",
+        "wartosc",
+        "wielkosc_mierzona",
+        "typ_wielkosci_mierzonej",
+        "jednostka",
+    ]
+    missing = [c for c in needed_cols if c not in d.columns]
+    if missing:
+        raise RuntimeError(f"Brakuje kolumn do reshape_three_phase: {missing}")
+
+    d["timestamp"] = pd.to_datetime(d["timestamp"], errors="coerce")
+
+    
+    def _norm_series(s: pd.Series) -> pd.Series:
+        s2 = s.astype(str).str.replace("ł", "l").str.replace("Ł", "L")
+        s2 = s2.apply(
+            lambda name: "".join(
+                c
+                for c in unicodedata.normalize("NFKD", name)
+                if not unicodedata.combining(c)
+            )
+        )
+        s2 = s2.str.lower().str.strip()
+        s2 = s2.str.replace(r"[^\w:]+", "_", regex=True)
+        s2 = s2.str.replace(r"_+", "_", regex=True).str.strip("_")
+        return s2
+
+    d["wielkosc_norm"] = _norm_series(d["wielkosc_mierzona"])
+    d["typ_norm"]      = _norm_series(d["typ_wielkosci_mierzonej"])
+    d["unit_norm"]     = _norm_series(d["jednostka"])
+
+    d["feat_name"] = (
+        d["wielkosc_norm"] + "__" + d["typ_norm"] + "__" + d["unit_norm"]
+    )
+
+    wide = (
+        d.pivot_table(
+            index="timestamp",
+            columns="feat_name",
+            values="wartosc",
+            aggfunc="mean",
+        )
+        .sort_index()
+        .reset_index()
+    )
+    rename_map = {
+        
+        "prad_elektryczny__fazy_1__a": "I1",
+        "prad_elektryczny__fazy_2__a": "I2",
+        "prad_elektryczny__fazy_3__a": "I3",
+
+        "napiecie_elektryczne__fazy_1__v": "U1",
+        "napiecie_elektryczne__fazy_2__v": "U2",
+        "napiecie_elektryczne__fazy_3__v": "U3",
+    }
+
+    wide = wide.rename(columns=rename_map)
+
+    
+    for col in ["numer_ppe", "typ_urzadzenia", "system_odczytowy"]:
+        if col in d.columns:
+            val = d[col].dropna()
+            wide[col] = str(val.iloc[0]) if not val.empty else np.nan
+
+    if {"I1", "I2", "I3"}.issubset(wide.columns):
+        wide["wartosc"] = wide[["I1", "I2", "I3"]].abs().sum(axis=1)
+    else:
+        wide["wartosc"] = np.nan
+
+    return wide
+
+
+
+
 
 
 def make_plot(d: pd.DataFrame, out_png: Path):
@@ -224,10 +346,85 @@ def make_plot(d: pd.DataFrame, out_png: Path):
     fig.savefig(out_png, dpi=150)
     plt.close(fig)
 
+def classify_fault_single(seg: pd.DataFrame) -> str:
+    """
+    Tryb single-unit (np. SELECTED_UNIT = 'A'):
+    zachowujemy dotychczasową logikę signal_loss vs outlier_run.
+    """
+    z_hour_mean = seg["z_hour"].mean() if "z_hour" in seg.columns else np.nan
+    is_near_zero_mean = seg["is_near_zero"].mean() if "is_near_zero" in seg.columns else 0.0
+
+    if (is_near_zero_mean > 0.5) or (pd.notna(z_hour_mean) and z_hour_mean < -5):
+        return "signal_loss"
+    else:
+        return "outlier_run"
+
+
+def classify_fault_multi(seg: pd.DataFrame) -> str:
+    """
+    Tryb multi-unit (SELECTED_UNIT = None):
+    klasyfikacja na podstawie wskaźników fizycznych (logika w stylu ENEA).
+    """
+
+    def med(col):
+        return seg[col].median() if col in seg.columns else np.nan
+
+    def mx(col):
+        return seg[col].max() if col in seg.columns else np.nan
+
+    S_med  = med("S")
+    wsp2_max = mx("wsp2")
+    wsp3_max = mx("wsp3")
+
+    U_med = {f"U{i}": med(f"U{i}") for i in (1, 2, 3)}
+    I_med = {f"I{i}": med(f"I{i}") for i in (1, 2, 3)}
+
+    for ph in (1, 2, 3):
+        u = U_med.get(f"U{ph}", np.nan)
+        if pd.notna(u) and u < 50:
+            return f"phase_loss_L{ph}"
+
+    for ph in (1, 2, 3):
+        u = U_med.get(f"U{ph}", np.nan)
+        i = I_med.get(f"I{ph}", np.nan)
+        if pd.notna(u) and pd.notna(i):
+            if u > 150 and i < 0.1:
+                return f"current_phase_loss_L{ph}"
+
+    if pd.notna(wsp2_max):
+        if wsp2_max > 10:
+            return "voltage_unbalance_critical"
+        if wsp2_max > 5:
+            return "voltage_unbalance"
+
+    if pd.notna(wsp3_max):
+        if wsp3_max > 15:
+            return "zero_sequence_critical"
+        if wsp3_max > 10:
+            return "zero_sequence"
+
+    if pd.notna(S_med):
+        if S_med > 3000:
+            return "overload_critical"
+        if S_med > 1500:
+            return "overload"
+
+    for ph in (1, 2, 3):
+        i = I_med.get(f"I{ph}", np.nan)
+        if pd.notna(i) and i < -0.2:
+            return "reverse_current"
+
+    if pd.notna(S_med) and S_med < 5:
+        if all((pd.notna(U_med.get(f"U{i}", np.nan)) and U_med[f"U{i}"] > 150) for i in (1, 2, 3)):
+            return "no_load"
+
+    return "statistical_outlier"
+
 
 def _merge_anomaly_events(d: pd.DataFrame) -> pd.DataFrame:
     if ANOMALY_LABEL_COL not in d.columns:
         return pd.DataFrame()
+
     x = d.copy()
     x = x.sort_values("timestamp").reset_index(drop=True)
     x["is_anom"] = (x[ANOMALY_LABEL_COL] == -1)
@@ -240,10 +437,11 @@ def _merge_anomaly_events(d: pd.DataFrame) -> pd.DataFrame:
     if pd.isna(base_step) or base_step <= pd.Timedelta(0):
         base_step = pd.Timedelta(minutes=10)
 
-    grp = []
-    cur = []
+    grp: list[list[pd.Series]] = []
+    cur: list[pd.Series] = []
     last_ts = None
     max_gap = pd.Timedelta(minutes=EVENT_GAP_MINUTES)
+
     for row in x.itertuples(index=False):
         if row.is_anom:
             ts = row.timestamp
@@ -268,25 +466,28 @@ def _merge_anomaly_events(d: pd.DataFrame) -> pd.DataFrame:
     for g in grp:
         if len(g) < MIN_EVENT_POINTS:
             continue
+
         start = g[0].timestamp
         end = g[-1].timestamp
         duration = (end - start) + base_step
+
         seg = x[(x["timestamp"] >= start) & (x["timestamp"] <= end)]
         med = seg["wartosc"].median()
+
         if ANOMALY_SCORE_COL in seg.columns:
             min_score = seg[ANOMALY_SCORE_COL].min()
         else:
             min_score = np.nan
-        
-        z_hour_mean = seg["z_hour"].mean() if "z_hour" in seg.columns else np.nan
-        if (seg["is_near_zero"].mean() > 0.5) or (pd.notna(z_hour_mean) and z_hour_mean < -5):
-            ev_type = "signal_loss"
+
+        if SELECTED_UNIT is None:
+            ev_type = classify_fault_multi(seg)
         else:
-            ev_type = "outlier_run"
+            ev_type = classify_fault_single(seg)
+
         events.append({
             "start": start,
             "end": end,
-            "duration_min": int(duration.total_seconds()//60),
+            "duration_min": int(duration.total_seconds() // 60),
             "n_points": len(seg),
             "median_value": float(med),
             "min_anomaly_score": float(min_score) if pd.notna(min_score) else np.nan,
@@ -294,6 +495,7 @@ def _merge_anomaly_events(d: pd.DataFrame) -> pd.DataFrame:
         })
 
     return pd.DataFrame(events)
+
 
 
 def save_outputs(d: pd.DataFrame, method: str):
@@ -337,10 +539,16 @@ def run_pipeline(method: str):
     df = filter_by_unit(df)
     d = pick_one_ppe(df)
     d = validate_selection(d)
+    if SELECTED_UNIT is None:
+        print("[INFO] SELECTED_UNIT=None -> uruchamiam reshape_three_phase (tryb trójfazowy)")
+        d = reshape_three_phase(d)
+    else:
+        print(f"[INFO] SELECTED_UNIT={SELECTED_UNIT} -> pomijam reshape_three_phase (tryb jednowymiarowy)")
     d = add_features(d)
     d = enrich_physics(d)
     d = apply_detector(d, method)
     save_outputs(d, method)
+    
 
 
 def parse_args(argv=None) -> argparse.Namespace:
