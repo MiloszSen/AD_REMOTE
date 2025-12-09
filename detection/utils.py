@@ -47,11 +47,6 @@ def get_scaler(name: str | None):
 
 
 def choose_features(df: pd.DataFrame, candidates: Sequence[str]) -> list[str]:
-    """
-    Bierzemy tylko te cechy, które:
-      - istnieją w df.columns
-      - NIE są w całości NaN
-    """
     feats: list[str] = []
     for c in candidates:
         if c in df.columns:

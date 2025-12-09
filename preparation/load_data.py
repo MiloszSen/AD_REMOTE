@@ -27,10 +27,6 @@ path = DATA_DIR_IN / FILENAME
 
 
 def detect_encoding(file_path: Path, *, sample_size: int = 100_000) -> str:
-    """
-    Heuristically detect encoding of a text file.
-    Prefers BOM detection, falls back to chardet if available, then simple trial decodes.
-    """
     with file_path.open("rb") as f:
         raw = f.read(sample_size)
 
@@ -71,9 +67,10 @@ df = pd.read_csv(
     encoding=encoding,)
 
 
-df.columns = [normalize_col(c) for c in df.columns]
+# df.columns = [normalize_col(c) for c in df.columns]
 # print(f"[INFO] Wykryto kodowanie: {encoding}")
 # print(tabulate(df.head(), headers='keys', tablefmt='psql'))
+# df.head().to_csv("C:/Users/agnie/OneDrive/Pulpit/AnomalyDetection/AD_REMOTE/data/head.csv")
 # df["numer_ppe"] = df["numer_ppe"].astype(str)
 # print(tabulate(df[["numer_ppe"]].drop_duplicates(), headers='keys', tablefmt='psql'))
-ppe = df["numer_ppe"].to_list()
+# ppe = df["numer_ppe"].to_list()

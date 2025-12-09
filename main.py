@@ -5,7 +5,8 @@ import pandas as pd
 import numpy as np
 from detection.indicators import compute_S, compute_pf, compute_wsp2, compute_wsp3, flags_from_indicators
 os.environ.setdefault("MPLBACKEND", "Agg")
-from preparation.load_data import ppe
+#from preparation.load_data import ppe
+from detection.comparison import build_comparison_report
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -26,18 +27,19 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 
-SELECTED_PPE: str | None = ppe[8]  
+SELECTED_PPE: str | None = "590310600000335883"
 
 SELECTED_UNIT: str | None = "V"
 
-PLOT_LAST_DAYS: int | None = 300
+PLOT_LAST_DAYS: int | None = None
 
 PLOT_STYLE: str = "line"
 
-DOWNSAMPLE_EVERY: int | None = 2
+DOWNSAMPLE_EVERY: int | None = None
 
 
-DETECTION_METHOD = "lof"  
+DETECTION_METHOD = "compare"  
+
 DETECTOR_PARAMS = {
     "isolation_forest": {
         "contamination": 0.0001,
@@ -46,21 +48,37 @@ DETECTOR_PARAMS = {
         "scaler": "robust",
     },
     "lof": {
-        "contamination": 0.001,
+        "contamination": 0.0001,
         "n_neighbors": 80,
         "scaler": "robust",
     },
     "knn": {
-        "contamination": 0.005,
-        "n_neighbors": 20,
+        "contamination": 0.0001,
+        "n_neighbors": 80,
         "scaler": "robust",
     },
 }
 
+COMPARISON_METHODS = [
+    m for m in ("lof", "knn", "isolation_forest")
+    if m in DETECTORS
+]
+
+
+def _spearman_corr(s1: pd.Series, s2: pd.Series) -> float:
+    s1 = pd.Series(s1)
+    s2 = pd.Series(s2)
+    mask = s1.notna() & s2.notna()
+    if mask.sum() < 2:
+        return np.nan
+
+    r1 = s1[mask].rank(method="average")
+    r2 = s2[mask].rank(method="average")
+    return r1.corr(r2)  
 
 NEAR_ZERO_THRESH = 0.1          
 EVENT_GAP_MINUTES = 20          
-MIN_EVENT_POINTS = 3           
+MIN_EVENT_POINTS = 2          
 
 def load_long() -> pd.DataFrame:
     if not DATA_MID.exists():
@@ -146,7 +164,7 @@ def apply_detector(d: pd.DataFrame, method: str = DETECTION_METHOD) -> pd.DataFr
     overrides = overrides.copy()  
 
     
-    if method == "lof" and SELECTED_UNIT is None:
+    if method in {"lof", "isolation_forest", "knn"} and SELECTED_UNIT is None:
         
         indicator_feats = [
             c for c in ["S", "wsp2", "wsp3"]
@@ -178,13 +196,6 @@ def _ppe_from_df(d: pd.DataFrame) -> str:
 
 
 def validate_selection(d: pd.DataFrame) -> pd.DataFrame:
-    """
-    Sprawdza spójność danych:
-    - zawsze wymagamy jednego PPE,
-    - JEDNOSTKA:
-        * jeśli SELECTED_UNIT jest ustawione -> pilnujemy jednej jednostki,
-        * jeśli SELECTED_UNIT is None -> pozwalamy na wiele jednostek (A, V, kW, ...).
-    """
    
     if "numer_ppe" in d.columns:
         ppes = d["numer_ppe"].dropna().astype(str).unique().tolist()
@@ -205,12 +216,7 @@ import unicodedata
 import re
 
 def reshape_three_phase(d: pd.DataFrame) -> pd.DataFrame:
-    """
-    Z formatu long (Prąd/Napięcie + Fazy 1/2/3 + A/V)
-    robi jeden wiersz na timestamp z kolumnami:
-      I1, I2, I3, U1, U2, U3
-    oraz definiuje 'wartosc' jako sumę modułów prądów fazowych.
-    """
+    
     d = d.copy()
 
     needed_cols = [
@@ -286,10 +292,6 @@ def reshape_three_phase(d: pd.DataFrame) -> pd.DataFrame:
     return wide
 
 
-
-
-
-
 def make_plot(d: pd.DataFrame, out_png: Path):
     d_plot = d.copy()
 
@@ -347,10 +349,7 @@ def make_plot(d: pd.DataFrame, out_png: Path):
     plt.close(fig)
 
 def classify_fault_single(seg: pd.DataFrame) -> str:
-    """
-    Tryb single-unit (np. SELECTED_UNIT = 'A'):
-    zachowujemy dotychczasową logikę signal_loss vs outlier_run.
-    """
+    
     z_hour_mean = seg["z_hour"].mean() if "z_hour" in seg.columns else np.nan
     is_near_zero_mean = seg["is_near_zero"].mean() if "is_near_zero" in seg.columns else 0.0
 
@@ -361,10 +360,6 @@ def classify_fault_single(seg: pd.DataFrame) -> str:
 
 
 def classify_fault_multi(seg: pd.DataFrame) -> str:
-    """
-    Tryb multi-unit (SELECTED_UNIT = None):
-    klasyfikacja na podstawie wskaźników fizycznych (logika w stylu ENEA).
-    """
 
     def med(col):
         return seg[col].median() if col in seg.columns else np.nan
@@ -533,21 +528,76 @@ def save_outputs(d: pd.DataFrame, method: str):
         with pd.option_context("display.max_rows", None, "display.width", 120):
             print(top.to_string(index=False))
 
+def run_all_detectors_and_compare(prepared: pd.DataFrame) -> pd.DataFrame:
+    
+    base = prepared.copy()
+    all_results = base.copy()
+
+    for method in COMPARISON_METHODS:
+        print(f"[INFO] Uruchamiam detektor={method} (tryb porównawczy)")
+        d_method = apply_detector(base, method)
+
+        score_col = f"{method}_score"
+        label_col = f"{method}_label"
+
+        if ANOMALY_SCORE_COL in d_method.columns:
+            all_results[score_col] = d_method[ANOMALY_SCORE_COL].values
+        if ANOMALY_LABEL_COL in d_method.columns:
+            all_results[label_col] = d_method[ANOMALY_LABEL_COL].values
+
+        save_outputs(d_method, method)
+
+   
+    print("\n[INFO] Korelacja Spearmana anomaly_score pomiędzy metodami:")
+    for i, m1 in enumerate(COMPARISON_METHODS):
+        for m2 in COMPARISON_METHODS[i + 1:]:
+            c1 = all_results.get(f"{m1}_score")
+            c2 = all_results.get(f"{m2}_score")
+            if c1 is None or c2 is None:
+                continue
+            rho = _spearman_corr(c1, c2)
+            print(f"  {m1} vs {m2}: {rho:.4f}")
+
+    
+    unit = _unit_from_df(all_results)
+    ppe = _ppe_from_df(all_results)
+    out_csv = OUT_DIR / f"comparison_scores_{unit}_{ppe}.csv"
+    all_results.to_csv(out_csv, index=False)
+    print(f"[OK] Zapisano zbiorcze wyniki porównania do: {out_csv}")
+    report = build_comparison_report(all_results)
+
+    print("\n[INFO] Podsumowanie porównania metod:")
+    with pd.option_context("display.max_rows", None, "display.width", 140):
+        print(report.to_string(index=False, float_format=lambda x: f"{x:.4f}" if isinstance(x, float) else str(x)))
+
+    unit = _unit_from_df(all_results)
+    ppe  = _ppe_from_df(all_results)
+    summary_path = OUT_DIR / f"comparison_summary_{unit}_{ppe}.csv"
+    report.to_csv(summary_path, index=False)
+    print(f"[OK] Zapisano podsumowanie porównania do: {summary_path}")
+    return all_results
+
 
 def run_pipeline(method: str):
     df = load_long()
     df = filter_by_unit(df)
     d = pick_one_ppe(df)
     d = validate_selection(d)
+
     if SELECTED_UNIT is None:
         print("[INFO] SELECTED_UNIT=None -> uruchamiam reshape_three_phase (tryb trójfazowy)")
         d = reshape_three_phase(d)
     else:
         print(f"[INFO] SELECTED_UNIT={SELECTED_UNIT} -> pomijam reshape_three_phase (tryb jednowymiarowy)")
+
     d = add_features(d)
     d = enrich_physics(d)
-    d = apply_detector(d, method)
-    save_outputs(d, method)
+
+    if method == "compare":
+        run_all_detectors_and_compare(d)
+    else:
+        d = apply_detector(d, method)
+        save_outputs(d, method)
     
 
 
@@ -555,9 +605,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Anomaly detection pipeline")
     parser.add_argument(
         "--method",
-        choices=sorted(DETECTORS),
+        choices=sorted(list(DETECTORS.keys()) + ["compare"]),
         default=DETECTION_METHOD,
-        help="Wybierz metodę detekcji anomalii",
+        help="Wybierz metodę detekcji anomalii (lub 'compare' aby uruchomić wszystkie i porównać)",
     )
     return parser.parse_args(argv)
 

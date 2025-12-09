@@ -91,12 +91,7 @@ def to_long(df: pd.DataFrame, *, date_col: str = "dane_za_dobe", value_col: str 
 
 
 def save_long(df_long: pd.DataFrame, *, basename: str = "data_long"):
-    """
-    Zapisz dane po transformacji:
-      - Parquet (szybkie ładowanie),
-      - CSV (opcjonalnie, gdy trzeba).
-    Dodatkowo zapis per-licznik do osobnych plików Parquet.
-    """
+    
     
     pqt_all = OUT_MID_DIR / f"{basename}.parquet"
     csv_all = OUT_MID_DIR / f"{basename}.csv"
