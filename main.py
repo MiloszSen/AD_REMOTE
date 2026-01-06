@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 from detection.indicators import compute_S, compute_pf, compute_wsp2, compute_wsp3, flags_from_indicators
 os.environ.setdefault("MPLBACKEND", "Agg")
-#from preparation.load_data import ppe
+from preparation.load_data import ppe
 from detection.comparison import build_comparison_report
 import matplotlib
 matplotlib.use("Agg")
@@ -27,9 +27,9 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 
-SELECTED_PPE: str | None = "590310600000335883"
+SELECTED_PPE: str | None = ppe[25254]
 
-SELECTED_UNIT: str | None = "V"
+SELECTED_UNIT: str | None = None
 
 PLOT_LAST_DAYS: int | None = None
 
@@ -37,26 +37,32 @@ PLOT_STYLE: str = "line"
 
 DOWNSAMPLE_EVERY: int | None = None
 
-
-DETECTION_METHOD = "compare"  
+contamin = 0.01
+DETECTION_METHOD = "knn"  
 
 DETECTOR_PARAMS = {
     "isolation_forest": {
-        "contamination": 0.0001,
+        "contamination": contamin,
         "n_estimators": 350,
         "random_state": 42,
         "scaler": "robust",
     },
     "lof": {
-        "contamination": 0.0001,
+        "contamination": contamin,
         "n_neighbors": 80,
         "scaler": "robust",
     },
     "knn": {
-        "contamination": 0.0001,
+        "contamination": contamin,
         "n_neighbors": 80,
         "scaler": "robust",
     },
+    "savgol": {
+    "window_length": 11,   
+    "polyorder": 2,
+    "z_thr": 4.0,
+    "contamination": contamin,
+}
 }
 
 COMPARISON_METHODS = [
@@ -77,8 +83,8 @@ def _spearman_corr(s1: pd.Series, s2: pd.Series) -> float:
     return r1.corr(r2)  
 
 NEAR_ZERO_THRESH = 0.1          
-EVENT_GAP_MINUTES = 20          
-MIN_EVENT_POINTS = 2          
+EVENT_GAP_MINUTES = 30          
+MIN_EVENT_POINTS = 20       
 
 def load_long() -> pd.DataFrame:
     if not DATA_MID.exists():
@@ -120,7 +126,6 @@ def pick_one_ppe(df: pd.DataFrame) -> pd.DataFrame:
 def add_features(d: pd.DataFrame) -> pd.DataFrame:
     d = d.copy()
 
-    # Usuwamy tylko wiersze bez czasu, ale zachowujemy NaNy w 'wartosc'
     d = d.dropna(subset=["timestamp"]).reset_index(drop=True)
 
     d["hour"] = d["timestamp"].dt.hour
@@ -128,7 +133,7 @@ def add_features(d: pd.DataFrame) -> pd.DataFrame:
     d["dayofweek"] = d["timestamp"].dt.dayofweek
     d = d.sort_values("timestamp")
 
-    # Dalej bez zmian:
+    
     d["roll_mean_1h"] = d["wartosc"].rolling(window=6, min_periods=1).mean()
     d["roll_std_1h"]  = d["wartosc"].rolling(window=6, min_periods=1).std().fillna(0.0)
 
@@ -178,7 +183,7 @@ def apply_detector(d: pd.DataFrame, method: str = DETECTION_METHOD) -> pd.DataFr
         print(f"[INFO] Uruchamiam detektor={method} z parametrami {overrides}")
     else:
         print(f"[INFO] Uruchamiam detektor={method}")
-
+    
     return detector(d, **overrides)
 
 
@@ -488,7 +493,7 @@ def _merge_anomaly_events(d: pd.DataFrame) -> pd.DataFrame:
             "min_anomaly_score": float(min_score) if pd.notna(min_score) else np.nan,
             "type": ev_type,
         })
-
+    print(x)
     return pd.DataFrame(events)
 
 
@@ -565,7 +570,8 @@ def run_all_detectors_and_compare(prepared: pd.DataFrame) -> pd.DataFrame:
     all_results.to_csv(out_csv, index=False)
     print(f"[OK] Zapisano zbiorcze wyniki porównania do: {out_csv}")
     report = build_comparison_report(all_results)
-
+    heatmap_path = OUT_DIR / f"comparison_heatmap_{unit}_{ppe}.png"
+    plot_comparison_heatmap(report, heatmap_path)
     print("\n[INFO] Podsumowanie porównania metod:")
     with pd.option_context("display.max_rows", None, "display.width", 140):
         print(report.to_string(index=False, float_format=lambda x: f"{x:.4f}" if isinstance(x, float) else str(x)))
@@ -577,6 +583,49 @@ def run_all_detectors_and_compare(prepared: pd.DataFrame) -> pd.DataFrame:
     print(f"[OK] Zapisano podsumowanie porównania do: {summary_path}")
     return all_results
 
+def plot_comparison_heatmap(report, out_path):
+   
+    methods = sorted(set(report["method_1"]).union(report["method_2"]))
+
+    
+    n = len(methods)
+    spearman = np.zeros((n, n))
+    agreement = np.zeros((n, n))
+
+    
+    for _, row in report.iterrows():
+        i = methods.index(row["method_1"])
+        j = methods.index(row["method_2"])
+
+        spearman[i, j] = spearman[j, i] = row["spearman_score"]
+        agreement[i, j] = agreement[j, i] = row["agreement_pct"]
+
+    fig, axs = plt.subplots(1, 2, figsize=(14, 4))
+
+    titles = ["Spearman (ranking score)", "Agreement (%)"]
+    matrices = [spearman, agreement]
+
+    for ax, title, mat in zip(axs, titles, matrices):
+        im = ax.imshow(mat, cmap="viridis")
+        ax.set_xticks(range(n))
+        ax.set_yticks(range(n))
+        ax.set_xticklabels(methods)
+        ax.set_yticklabels(methods)
+        ax.set_title(title)
+
+        
+        for i in range(n):
+            for j in range(n):
+                val = mat[i, j]
+                if "Spearman" in title:
+                    text = f"{val:.2f}"     
+                else:
+                    text = f"{val:.1f}%"    
+                ax.text(j, i, text, ha="center", va="center", color="black", fontsize=10)
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close()
+    print(f"[OK] Zapisano heatmapę porównania do: {out_path}")
 
 def run_pipeline(method: str):
     df = load_long()

@@ -67,10 +67,10 @@ df = pd.read_csv(
     encoding=encoding,)
 
 
-# df.columns = [normalize_col(c) for c in df.columns]
+df.columns = [normalize_col(c) for c in df.columns]
 # print(f"[INFO] Wykryto kodowanie: {encoding}")
 # print(tabulate(df.head(), headers='keys', tablefmt='psql'))
-# df.head().to_csv("C:/Users/agnie/OneDrive/Pulpit/AnomalyDetection/AD_REMOTE/data/head.csv")
-# df["numer_ppe"] = df["numer_ppe"].astype(str)
+#df.head().to_csv("C:/Users/agnie/OneDrive/Pulpit/AnomalyDetection/AD_REMOTE/data/head.csv")
+df["numer_ppe"] = df["numer_ppe"].astype(str)
 # print(tabulate(df[["numer_ppe"]].drop_duplicates(), headers='keys', tablefmt='psql'))
-# ppe = df["numer_ppe"].to_list()
+ppe = df["numer_ppe"].to_list()

@@ -114,5 +114,6 @@ def save_long(df_long: pd.DataFrame, *, basename: str = "data_long"):
 
 
 if __name__ == "__main__":
-    df_long = to_long(load_data.df)
+
+    df_long = to_long(load_data.df) 
     save_long(df_long, basename="data_long")

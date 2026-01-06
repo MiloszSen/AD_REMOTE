@@ -4,7 +4,7 @@ from typing import Callable, Dict
 
 import pandas as pd
 
-from . import isolation_forest, lof, knn
+from . import isolation_forest, lof, knn, savgol
 
 DetectorFn = Callable[[pd.DataFrame], pd.DataFrame]
 
@@ -12,6 +12,7 @@ DETECTORS: Dict[str, DetectorFn] = {
     "isolation_forest": isolation_forest.run,
     "lof": lof.run,
     "knn": knn.run,
+    "savgol": savgol.run,
 }
 
 DEFAULT_PARAMS: Dict[str, dict] = {
@@ -23,6 +24,7 @@ METHOD_ALIASES: Dict[str, str] = {
     "isolation_forest": "if",
     "lof": "lof",
     "knn": "knn",
+    "savgol" : "sg"
 }
 
 
