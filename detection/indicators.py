@@ -34,9 +34,9 @@ def compute_wsp3(df: pd.DataFrame, cols_u=("U1","U2","U3")) -> pd.Series:
     if not _has_cols(df, cols_u):
         return pd.Series(np.nan, index=df.index)
     U1, U2, U3 = (df[c].astype(float) for c in cols_u)
-    # Osadzenie faz na 0°, +120°, -120°
+    
     x = U1*1.0 + U2*(-0.5) + U3*(-0.5)
-    y = U2*(np.sqrt(3)/2) + U3*(-np.sqrt(3)/2)  # U1 ma 0 w y
+    y = U2*(np.sqrt(3)/2) + U3*(-np.sqrt(3)/2)  
     return np.sqrt(x*x + y*y)
 
 def flags_from_indicators(df: pd.DataFrame,

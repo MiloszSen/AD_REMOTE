@@ -27,18 +27,18 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 
-SELECTED_PPE: str | None = ppe[25254]
+SELECTED_PPE: str | None = 590310600000335883
 
-SELECTED_UNIT: str | None = None
+SELECTED_UNIT: str | None = "V"
 
 PLOT_LAST_DAYS: int | None = None
 
 PLOT_STYLE: str = "line"
 
-DOWNSAMPLE_EVERY: int | None = None
+DOWNSAMPLE_EVERY: int | None = 4
 
-contamin = 0.01
-DETECTION_METHOD = "knn"  
+contamin = 0.001
+DETECTION_METHOD = "lof"  
 
 DETECTOR_PARAMS = {
     "isolation_forest": {
@@ -56,13 +56,14 @@ DETECTOR_PARAMS = {
         "contamination": contamin,
         "n_neighbors": 80,
         "scaler": "robust",
-    },
-    "savgol": {
-    "window_length": 11,   
-    "polyorder": 2,
-    "z_thr": 4.0,
-    "contamination": contamin,
-}
+    }
+#     ,
+#     "savgol": {
+#     "window_length": 11,   
+#     "polyorder": 2,
+#     "z_thr": 4.0,
+#     "contamination": contamin,
+# }
 }
 
 COMPARISON_METHODS = [
@@ -84,7 +85,7 @@ def _spearman_corr(s1: pd.Series, s2: pd.Series) -> float:
 
 NEAR_ZERO_THRESH = 0.1          
 EVENT_GAP_MINUTES = 30          
-MIN_EVENT_POINTS = 20       
+MIN_EVENT_POINTS = 3       
 
 def load_long() -> pd.DataFrame:
     if not DATA_MID.exists():
